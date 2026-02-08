@@ -219,7 +219,7 @@ df_prog = pd.merge(daily_base, daily_room, on=['dt', '統一店名'], how='outer
 df_prog['年月ラベル'] = df_prog['dt'].dt.strftime('%Y年%m月')
 
 def calc_store_milestones(store_name):
-    """店舗の全期間5日刻みマイルストーン累計売上を算出"""
+    """店舗の全期間5日刻みマイルストーン累計売上を算出（店舗全体/外部媒体/合計）"""
     s_data = df_prog[df_prog['統一店名'] == store_name]
     result = []
     for label, m_dt in zip(month_labels, months_13_dt):
@@ -229,23 +229,33 @@ def calc_store_milestones(store_name):
         end_date = cutoff_dt if label == current_month_label else pd.Timestamp(yr, mo, last_day)
         full_range = pd.date_range(pd.Timestamp(yr, mo, 1), end_date, freq='D')
         if m_data.empty:
-            result.append([label] + [0]*6)
+            result.append({"m": label, "s": [0]*6, "e": [0]*6, "t": [0]*6})
             continue
         daily = m_data.groupby('dt').agg(
             {'ベース売上':'sum', '設備予約_内部':'sum', '外部媒体売上_部屋':'sum'}
         ).reindex(full_range, fill_value=0)
-        cum = (daily['ベース売上'] + daily['設備予約_内部'] + daily['外部媒体売上_部屋']).cumsum()
-        vals = []
+        cum_s = (daily['ベース売上'] + daily['設備予約_内部']).cumsum()
+        cum_e = daily['外部媒体売上_部屋'].cumsum()
+        cum_t = cum_s + cum_e
+        s_vals, e_vals, t_vals = [], [], []
         for day in [5, 10, 15, 20, 25]:
             target = pd.Timestamp(yr, mo, min(day, last_day))
             if target <= end_date:
-                prev = cum[cum.index <= target]
-                vals.append(int(prev.iloc[-1]) if len(prev) > 0 else 0)
+                ps = cum_s[cum_s.index <= target]
+                pe = cum_e[cum_e.index <= target]
+                pt = cum_t[cum_t.index <= target]
+                s_vals.append(int(ps.iloc[-1]) if len(ps) > 0 else 0)
+                e_vals.append(int(pe.iloc[-1]) if len(pe) > 0 else 0)
+                t_vals.append(int(pt.iloc[-1]) if len(pt) > 0 else 0)
             else:
-                vals.append(None)
-        last_avail = cum[cum.index <= end_date]
-        vals.append(int(last_avail.iloc[-1]) if len(last_avail) > 0 else 0)
-        result.append([label] + vals)
+                s_vals.append(None); e_vals.append(None); t_vals.append(None)
+        ls = cum_s[cum_s.index <= end_date]
+        le = cum_e[cum_e.index <= end_date]
+        lt = cum_t[cum_t.index <= end_date]
+        s_vals.append(int(ls.iloc[-1]) if len(ls) > 0 else 0)
+        e_vals.append(int(le.iloc[-1]) if len(le) > 0 else 0)
+        t_vals.append(int(lt.iloc[-1]) if len(lt) > 0 else 0)
+        result.append({"m": label, "s": s_vals, "e": e_vals, "t": t_vals})
     return result
 
 # ==========================================
@@ -364,11 +374,21 @@ function getFacTbl(rows) {
 }
 
 function getProgressTbl(rows) {
-    let h = '<div class="table-c"><table><thead><tr><th>月次</th><th>~5日</th><th>~10日</th><th>~15日</th><th>~20日</th><th>~25日</th><th style="background:#e8f8ed">~月末</th></tr></thead><tbody>';
+    const periods = ['~5日','~10日','~15日','~20日','~25日','~月末'];
+    let h = '<div class="table-c"><table><thead><tr><th rowspan="2" style="min-width:100px">月次</th>';
+    periods.forEach((p,i) => { h += `<th colspan="3"${i===5?' style="background:#e8f8ed"':''}>${p}</th>`; });
+    h += '</tr><tr>';
+    for(let i=0;i<6;i++) h += '<th style="font-size:0.65rem">店舗</th><th style="font-size:0.65rem">外部</th><th style="font-size:0.65rem;background:#ffeaa7">計</th>';
+    h += '</tr></thead><tbody>';
     rows.forEach(r => {
-        h += `<tr><td>${r[0]}</td>`;
-        for(let i=1;i<=5;i++){ h += r[i]!==null ? `<td>${r[i].toLocaleString()}</td>` : '<td style="color:#ccc">-</td>'; }
-        h += r[6]!==null ? `<td class="tot">${r[6].toLocaleString()}</td>` : '<td style="color:#ccc">-</td>';
+        h += `<tr><td>${r.m}</td>`;
+        for(let i=0;i<6;i++){
+            if(r.t[i]!==null){
+                h += `<td>${r.s[i].toLocaleString()}</td><td>${r.e[i].toLocaleString()}</td><td style="background:#ffeaa7;font-weight:bold">${r.t[i].toLocaleString()}</td>`;
+            } else {
+                h += '<td style="color:#ccc">-</td><td style="color:#ccc">-</td><td style="color:#ccc">-</td>';
+            }
+        }
         h += '</tr>';
     });
     return h + '</tbody></table></div>';
