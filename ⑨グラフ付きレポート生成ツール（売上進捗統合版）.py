@@ -249,12 +249,16 @@ def calc_store_milestones(store_name):
                 t_vals.append(int(pt.iloc[-1]) if len(pt) > 0 else 0)
             else:
                 s_vals.append(None); e_vals.append(None); t_vals.append(None)
-        ls = cum_s[cum_s.index <= end_date]
-        le = cum_e[cum_e.index <= end_date]
-        lt = cum_t[cum_t.index <= end_date]
-        s_vals.append(int(ls.iloc[-1]) if len(ls) > 0 else 0)
-        e_vals.append(int(le.iloc[-1]) if len(le) > 0 else 0)
-        t_vals.append(int(lt.iloc[-1]) if len(lt) > 0 else 0)
+        # 月末 — 当月で月末未到達ならNone
+        if label != current_month_label or cutoff_dt.is_month_end:
+            ls = cum_s[cum_s.index <= end_date]
+            le = cum_e[cum_e.index <= end_date]
+            lt = cum_t[cum_t.index <= end_date]
+            s_vals.append(int(ls.iloc[-1]) if len(ls) > 0 else 0)
+            e_vals.append(int(le.iloc[-1]) if len(le) > 0 else 0)
+            t_vals.append(int(lt.iloc[-1]) if len(lt) > 0 else 0)
+        else:
+            s_vals.append(None); e_vals.append(None); t_vals.append(None)
         result.append({"m": label, "s": s_vals, "e": e_vals, "t": t_vals})
     return result
 
