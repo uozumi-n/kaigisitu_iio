@@ -1,4 +1,4 @@
-# @title ⑨グラフ付きのレポート生成ツール（前月データ補完強化版・⑧売上進捗統合）
+# @title ⑦グラフ付きのレポート生成ツール（前月データ補完強化版・⑧売上進捗統合）
 # ==========================================
 # 1. システム準備
 # ==========================================
@@ -197,18 +197,17 @@ def get_data(s_name=None, f_name=None, mode="linkage", is_global=False):
     return res_list
 
 # ------------------------------------------
-# 5日刻み売上進捗データの生成 (⑧統合)
+# 5日刻み売上進捗データの生成 (⑧統合・店舗別全期間)
 # ------------------------------------------
 print("-> 5日刻み売上進捗データを生成中...")
+import calendar
 
-# いいアプリ(内部)と外部媒体を日別・店舗別に集計
 _is_internal = df_main['媒体名'] == 'いいアプリ'
 daily_room = df_main.groupby(['dt', '統一店名', _is_internal.rename('is_int')])['売上'].sum().unstack(fill_value=0).reset_index()
 if True not in daily_room.columns: daily_room[True] = 0
 if False not in daily_room.columns: daily_room[False] = 0
 daily_room.rename(columns={True: '設備予約_内部', False: '外部媒体売上_部屋'}, inplace=True)
 
-# 連携データからベース売上(月額契約・分配金・その他・従量課金)を日別集計
 base_cols_prog = ['従量課金', '月額契約', '分配金', 'その他']
 df_store_prog = df_store.copy()
 for c in base_cols_prog:
@@ -216,43 +215,48 @@ for c in base_cols_prog:
 df_store_prog['ベース売上'] = df_store_prog[base_cols_prog].sum(axis=1)
 daily_base = df_store_prog.groupby(['dt', '統一店名'])['ベース売上'].sum().reset_index()
 
-# 結合して当月データに限定
 df_prog = pd.merge(daily_base, daily_room, on=['dt', '統一店名'], how='outer').fillna(0)
-current_ym = cutoff_dt.strftime('%Y-%m')
-df_prog_cur = df_prog[df_prog['dt'].dt.strftime('%Y-%m') == current_ym].copy()
+df_prog['年月ラベル'] = df_prog['dt'].dt.strftime('%Y年%m月')
 
-# マイルストーン日付(5日, 10日, 15日, 20日, 25日, 月末 + 最新日)
-month_start = cutoff_dt.replace(day=1)
-full_dates = pd.date_range(month_start, cutoff_dt, freq='D')
-milestone_dates = sorted(set(
-    [d for d in full_dates if d.day in [5, 10, 15, 20, 25] or d.is_month_end]
-    + [cutoff_dt]
-))
-
-# 全店合計の進捗
-all_daily_p = df_prog_cur.groupby('dt').agg(
-    {'ベース売上':'sum', '設備予約_内部':'sum', '外部媒体売上_部屋':'sum'}
-).reindex(full_dates, fill_value=0)
-all_cum_st = (all_daily_p['ベース売上'] + all_daily_p['設備予約_内部']).cumsum()
-all_cum_ex = all_daily_p['外部媒体売上_部屋'].cumsum()
-progress_all_store = [int(all_cum_st.loc[d]) for d in milestone_dates]
-progress_all_ext = [int(all_cum_ex.loc[d]) for d in milestone_dates]
-
-# 店舗別の進捗
-progress_stores = []
-for sname in ordered_stores:
-    s_data = df_prog_cur[df_prog_cur['統一店名'] == sname]
-    s_agg = s_data.groupby('dt').agg(
-        {'ベース売上':'sum', '設備予約_内部':'sum', '外部媒体売上_部屋':'sum'}
-    ).reindex(full_dates, fill_value=0)
-    s_cum_st = (s_agg['ベース売上'] + s_agg['設備予約_内部']).cumsum()
-    s_cum_ex = s_agg['外部媒体売上_部屋'].cumsum()
-    progress_stores.append({
-        'name': sname,
-        'store_total': [int(s_cum_st.loc[d]) for d in milestone_dates],
-        'external': [int(s_cum_ex.loc[d]) for d in milestone_dates]
-    })
-progress_milestones = [d.strftime('%m/%d') for d in milestone_dates]
+def calc_store_milestones(store_name):
+    """店舗の全期間5日刻みマイルストーン累計売上を算出（店舗全体/外部媒体/合計）"""
+    s_data = df_prog[df_prog['統一店名'] == store_name]
+    result = []
+    for label, m_dt in zip(month_labels, months_13_dt):
+        yr, mo = m_dt.year, m_dt.month
+        _, last_day = calendar.monthrange(yr, mo)
+        m_data = s_data[s_data['年月ラベル'] == label]
+        end_date = cutoff_dt if label == current_month_label else pd.Timestamp(yr, mo, last_day)
+        full_range = pd.date_range(pd.Timestamp(yr, mo, 1), end_date, freq='D')
+        if m_data.empty:
+            result.append({"m": label, "s": [0]*6, "e": [0]*6, "t": [0]*6})
+            continue
+        daily = m_data.groupby('dt').agg(
+            {'ベース売上':'sum', '設備予約_内部':'sum', '外部媒体売上_部屋':'sum'}
+        ).reindex(full_range, fill_value=0)
+        cum_s = (daily['ベース売上'] + daily['設備予約_内部']).cumsum()
+        cum_e = daily['外部媒体売上_部屋'].cumsum()
+        cum_t = cum_s + cum_e
+        s_vals, e_vals, t_vals = [], [], []
+        for day in [5, 10, 15, 20, 25]:
+            target = pd.Timestamp(yr, mo, min(day, last_day))
+            if target <= end_date:
+                ps = cum_s[cum_s.index <= target]
+                pe = cum_e[cum_e.index <= target]
+                pt = cum_t[cum_t.index <= target]
+                s_vals.append(int(ps.iloc[-1]) if len(ps) > 0 else 0)
+                e_vals.append(int(pe.iloc[-1]) if len(pe) > 0 else 0)
+                t_vals.append(int(pt.iloc[-1]) if len(pt) > 0 else 0)
+            else:
+                s_vals.append(None); e_vals.append(None); t_vals.append(None)
+        ls = cum_s[cum_s.index <= end_date]
+        le = cum_e[cum_e.index <= end_date]
+        lt = cum_t[cum_t.index <= end_date]
+        s_vals.append(int(ls.iloc[-1]) if len(ls) > 0 else 0)
+        e_vals.append(int(le.iloc[-1]) if len(le) > 0 else 0)
+        t_vals.append(int(lt.iloc[-1]) if len(lt) > 0 else 0)
+        result.append({"m": label, "s": s_vals, "e": e_vals, "t": t_vals})
+    return result
 
 # ==========================================
 # 4. JSON構築
@@ -271,14 +275,9 @@ for idx, sname in enumerate(ordered_stores):
         "id": f"st_{idx}", "name": sname,
         "summary": get_data(sname, mode="linkage"),
         "original_summary": get_data(sname, mode="original"),
-        "facilities": fac_data
+        "facilities": fac_data,
+        "progress": calc_store_milestones(sname)
     })
-js_master["progress"] = {
-    "month": current_month_label,
-    "milestones": progress_milestones,
-    "all": {"store_total": progress_all_store, "external": progress_all_ext},
-    "stores": progress_stores
-}
 
 # ==========================================
 # 5. HTML生成
@@ -322,7 +321,7 @@ const media = """ + media_list_str + """;
 const content = document.getElementById('main-c');
 const nav = document.getElementById('nav-ul');
 
-let nHtml = '<li><a href="#g-all">全店舗合計 (総合)</a></li><li><a href="#g-room">全店舗合計 (会議室のみ)</a></li><li><a href="#progress" style="color:#f1c40f;font-weight:bold">5日刻み売上進捗</a></li>';
+let nHtml = '<li><a href="#g-all">全店舗合計 (総合)</a></li><li><a href="#g-room">全店舗合計 (会議室のみ)</a></li>';
 data.stores.forEach(s => { nHtml += `<li><a href="#${s.id}">${s.name}</a></li>`; });
 nav.innerHTML = nHtml;
 
@@ -374,18 +373,35 @@ function getFacTbl(rows) {
     return h + '</tbody></table></div>';
 }
 
+function getProgressTbl(rows) {
+    const periods = ['~5日','~10日','~15日','~20日','~25日','~月末'];
+    let h = '<div class="table-c"><table><thead><tr><th rowspan="2" style="min-width:100px">月次</th>';
+    periods.forEach((p,i) => { h += `<th colspan="3"${i===5?' style="background:#e8f8ed"':''}>${p}</th>`; });
+    h += '</tr><tr>';
+    for(let i=0;i<6;i++) h += '<th style="font-size:0.65rem">店舗</th><th style="font-size:0.65rem">外部</th><th style="font-size:0.65rem;background:#ffeaa7">計</th>';
+    h += '</tr></thead><tbody>';
+    rows.forEach(r => {
+        h += `<tr><td>${r.m}</td>`;
+        for(let i=0;i<6;i++){
+            if(r.t[i]!==null){
+                h += `<td>${r.s[i].toLocaleString()}</td><td>${r.e[i].toLocaleString()}</td><td style="background:#ffeaa7;font-weight:bold">${r.t[i].toLocaleString()}</td>`;
+            } else {
+                h += '<td style="color:#ccc">-</td><td style="color:#ccc">-</td><td style="color:#ccc">-</td>';
+            }
+        }
+        h += '</tr>';
+    });
+    return h + '</tbody></table></div>';
+}
+
 let sHtml = `<section id="g-all" class="section"><div class="title-bar"><h2>📊 全店舗合計 (総合)</h2><span>基準日: """ + cutoff_dt.strftime('%Y/%m/%d') + """</span></div><div class="card"><div class="card-h">全社実績 (連携データベース)</div><div class="card-b"><div id="c-gall" style="height:400px;"></div><div id="t-gall"></div></div></div></section>
-<section id="g-room" class="section"><div class="title-bar"><h2>💼 全店舗合計 (会議室のみ)</h2></div><div class="card"><div class="card-h">全社 会議室予約内訳 (全体元データベース)</div><div class="card-b"><div id="c-groom" style="height:400px;"></div><div id="t-groom"></div></div></div></section>
-<section id="progress" class="section"><div class="title-bar"><h2>📈 ${data.progress.month} 5日刻み売上進捗</h2><span>基準日: """ + cutoff_dt.strftime('%Y/%m/%d') + """</span></div>
-<div class="card"><div class="card-h">全店舗 売上進捗推移（累計）</div><div class="card-b"><div id="c-prog-line" style="height:450px;"></div></div></div>
-<div class="card"><div class="card-h">店舗別 最新売上内訳</div><div class="card-b"><div id="c-prog-bar" style="height:400px;"></div></div></div>
-<div class="card"><div class="card-h">5日刻み売上進捗テーブル</div><div class="card-b"><div id="t-prog"></div></div></div>
-</section>`;
+<section id="g-room" class="section"><div class="title-bar"><h2>💼 全店舗合計 (会議室のみ)</h2></div><div class="card"><div class="card-h">全社 会議室予約内訳 (全体元データベース)</div><div class="card-b"><div id="c-groom" style="height:400px;"></div><div id="t-groom"></div></div></div></section>`;
 
 data.stores.forEach(s => {
     sHtml += `<section id="${s.id}" class="section"><div class="title-bar"><h2>🏠 ${s.name}</h2><span>基準日: """ + cutoff_dt.strftime('%Y/%m/%d') + """</span></div>
         <div class="card"><div class="card-h">① 店舗全体実績 (連携データベース)</div><div class="card-b"><div id="c-s-${s.id}" style="height:400px;"></div><div id="t-s-${s.id}"></div></div></div>
-        <div class="card"><div class="card-h">② 会議室予約合計 (全体元データベース)</div><div class="card-b"><div id="c-sori-${s.id}" style="height:400px;"></div><div id="t-sori-${s.id}"></div></div></div>`;
+        <div class="card"><div class="card-h">② 会議室予約合計 (全体元データベース)</div><div class="card-b"><div id="c-sori-${s.id}" style="height:400px;"></div><div id="t-sori-${s.id}"></div></div></div>
+        <div class="card"><div class="card-h">③ 5日刻み売上進捗（累計）</div><div class="card-b"><div id="t-prog-${s.id}"></div></div></div>`;
     s.facilities.forEach((f, i) => {
         sHtml += `<div class="card"><div class="card-h">【設備】${f.name} (全体元データ参照)</div><div class="card-b"><div style="display:flex; flex-wrap:wrap; gap:15px;"><div id="c-fs-${s.id}-${i}" style="flex:1; min-width:320px; height:380px;"></div><div id="c-fc-${s.id}-${i}" style="flex:1; min-width:320px; height:380px;"></div></div><div id="t-f-${s.id}-${i}"></div></div></div>`;
     });
@@ -406,43 +422,13 @@ function render(id) {
     } else if(id==='g-room'){
         Plotly.newPlot('c-groom', media.map(c=>({x:data.g_room.map(r=>r.month),y:data.g_room.map(r=>r[c]),name:c,type:'bar'})).filter(t=>t.y.some(v=>v>0)), lay, cfg);
         document.getElementById('t-groom').innerHTML = getOriginalTbl(data.g_room, media);
-    } else if(id==='progress'){
-        const pg = data.progress;
-        const ms = pg.milestones;
-        const pLay = { margin:{t:50,b:60,l:80,r:15}, font:{size:11}, legend:{orientation:'h',y:-0.2}, colorway:['#2c3e50','#22923f','#3498db','#9b59b6','#f1c40f','#e67e22','#e74c3c','#1abc9c','#e91e63','#607d8b','#795548','#00bcd4','#ff5722','#4caf50','#673ab7','#ff9800','#009688','#f44336','#3f51b5','#cddc39'] };
-        // 折れ線グラフ：店舗別の月間売上累計推移
-        const lineTraces = [{x:ms,y:pg.all.store_total.map((v,i)=>v+pg.all.external[i]),name:'全店合計',type:'scatter',mode:'lines+markers',line:{width:3,dash:'dash',color:'#000'}}];
-        pg.stores.forEach(s=>{lineTraces.push({x:ms,y:s.store_total.map((v,i)=>v+s.external[i]),name:s.name,type:'scatter',mode:'lines+markers'});});
-        Plotly.newPlot('c-prog-line',lineTraces,{...pLay,title:pg.month+' 月間売上累計推移（5日刻み）',xaxis:{title:'日付'},yaxis:{title:'累計売上（円）'}},cfg);
-        // 積み上げ棒グラフ：最新時点の店舗別内訳
-        const li = ms.length-1;
-        const sNames = pg.stores.map(s=>s.name);
-        Plotly.newPlot('c-prog-bar',[
-            {x:sNames,y:pg.stores.map(s=>s.store_total[li]),name:'店舗全体売上',type:'bar',marker:{color:'#22923f'}},
-            {x:sNames,y:pg.stores.map(s=>s.external[li]),name:'外部媒体売上',type:'bar',marker:{color:'#3498db'}}
-        ],{...pLay,barmode:'stack',title:'最新時点 ('+ms[li]+') 店舗別売上内訳'},cfg);
-        // テーブル
-        let tbl='<div class="table-c"><table><thead><tr><th rowspan="2" style="min-width:120px;position:sticky;left:0;background:#f1f2f6;z-index:1">店舗名</th>';
-        ms.forEach(m=>{tbl+=`<th colspan="3" style="background:#e8f8ed">~${m}</th>`;});
-        tbl+='</tr><tr>';
-        ms.forEach(()=>{tbl+='<th>店舗全体</th><th>外部媒体</th><th style="background:#ffeaa7">合計</th>';});
-        tbl+='</tr></thead><tbody>';
-        tbl+='<tr style="background:#e8f8ed;font-weight:bold"><td style="position:sticky;left:0;background:#e8f8ed;z-index:1">全店合計</td>';
-        ms.forEach((_,i)=>{const st=pg.all.store_total[i],ex=pg.all.external[i];tbl+=`<td>${st.toLocaleString()}</td><td>${ex.toLocaleString()}</td><td style="background:#ffeaa7;font-weight:bold">${(st+ex).toLocaleString()}</td>`;});
-        tbl+='</tr>';
-        pg.stores.forEach(s=>{
-            tbl+=`<tr><td style="position:sticky;left:0;background:#fafafa;z-index:1">${s.name}</td>`;
-            ms.forEach((_,i)=>{const st=s.store_total[i],ex=s.external[i];tbl+=`<td>${st.toLocaleString()}</td><td>${ex.toLocaleString()}</td><td style="background:#ffeaa7">${(st+ex).toLocaleString()}</td>`;});
-            tbl+='</tr>';
-        });
-        tbl+='</tbody></table></div>';
-        document.getElementById('t-prog').innerHTML=tbl;
     } else {
         const s = data.stores.find(x => x.id === id); if(!s) return;
         Plotly.newPlot('c-s-'+id, s_cats.map(c=>({x:s.summary.map(r=>r.month),y:s.summary.map(r=>r[c]),name:c,type:'bar'})).filter(t=>t.y.some(v=>v>0)), lay, cfg);
         document.getElementById('t-s-'+id).innerHTML = getStoreTbl(s.summary);
         Plotly.newPlot('c-sori-'+id, media.map(c=>({x:s.original_summary.map(r=>r.month),y:s.original_summary.map(r=>r[c]),name:c,type:'bar'})).filter(t=>t.y.some(v=>v>0)), lay, cfg);
         document.getElementById('t-sori-'+id).innerHTML = getOriginalTbl(s.original_summary, media);
+        document.getElementById('t-prog-'+id).innerHTML = getProgressTbl(s.progress);
         s.facilities.forEach((f,i)=>{
             Plotly.newPlot(`c-fs-${id}-${i}`, media.map(m=>({x:f.data.map(r=>r.month),y:f.data.map(r=>r["s_"+m]),name:m,type:'bar'})).filter(t=>t.y.some(v=>v>0)), {...lay, title:'売上推移'}, cfg);
             Plotly.newPlot(`c-fc-${id}-${i}`, media.map(m=>({x:f.data.map(r=>r.month),y:f.data.map(r=>r["c_"+m]),name:m,type:'bar'})).filter(t=>t.y.some(v=>v>0)), {...lay, title:'件数推移'}, cfg);
